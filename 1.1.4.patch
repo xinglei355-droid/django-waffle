@@ -1,0 +1,56 @@
+diff --git a/waffle/middleware.py b/waffle/middleware.py
+index ec31b1a..67f0b2f 100644
+--- a/waffle/middleware.py
++++ b/waffle/middleware.py
+@@ -14,8 +14,7 @@ class WaffleMiddleware(MiddlewareMixin):
+             for k in request.waffles:
+                 name = smart_str(get_setting('COOKIE') % k)
+                 active, rollout = request.waffles[k]
+-                if rollout and not active:
+-                    # "Inactive" is a session cookie during rollout mode.
++                if not active:
+                     age = None
+                 else:
+                     age = max_age
+diff --git a/waffle/tests/test_middleware.py b/waffle/tests/test_middleware.py
+index 11af7c9..a7bee34 100644
+--- a/waffle/tests/test_middleware.py
++++ b/waffle/tests/test_middleware.py
+@@ -32,10 +32,34 @@ def test_rollout_cookies():
+         cookie = f'dwf_{k}'
+         assert cookie in resp.cookies
+         assert str(get.waffles[k][0]) == resp.cookies[cookie].value
+-        if get.waffles[k][1]:
+-            assert bool(resp.cookies[cookie]['max-age']) == get.waffles[k][0]
+-        else:
++        if get.waffles[k][0]:
+             assert resp.cookies[cookie]['max-age']
++        else:
++            assert not resp.cookies[cookie]['max-age']
++
++
++def test_cookie_max_age_all_combinations():
++    """Verify cookie max_age for all four combinations of active and rollout."""
++    from waffle.defaults import MAX_AGE
++
++    get.waffles = {
++        'active_rollout': [True, True],
++        'inactive_rollout': [False, True],
++        'active_no_rollout': [True, False],
++        'inactive_no_rollout': [False, False],
++    }
++    resp = HttpResponse()
++    resp = WaffleMiddleware().process_response(get, resp)
++
++    for key, (active, rollout) in get.waffles.items():
++        cookie = f'dwf_{key}'
++        assert cookie in resp.cookies
++        assert str(active) == resp.cookies[cookie].value
++
++        if active:
++            assert resp.cookies[cookie]['max-age'] == MAX_AGE
++        else:
++            assert not resp.cookies[cookie]['max-age']
+ 
+ 
+ def test_testing_cookies():

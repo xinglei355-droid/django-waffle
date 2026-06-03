@@ -32,10 +32,34 @@ def test_rollout_cookies():
         cookie = f'dwf_{k}'
         assert cookie in resp.cookies
         assert str(get.waffles[k][0]) == resp.cookies[cookie].value
-        if get.waffles[k][1]:
-            assert bool(resp.cookies[cookie]['max-age']) == get.waffles[k][0]
-        else:
+        if get.waffles[k][0]:
             assert resp.cookies[cookie]['max-age']
+        else:
+            assert not resp.cookies[cookie]['max-age']
+
+
+def test_cookie_max_age_all_combinations():
+    """Verify cookie max_age for all four combinations of active and rollout."""
+    from waffle.defaults import MAX_AGE
+
+    get.waffles = {
+        'active_rollout': [True, True],
+        'inactive_rollout': [False, True],
+        'active_no_rollout': [True, False],
+        'inactive_no_rollout': [False, False],
+    }
+    resp = HttpResponse()
+    resp = WaffleMiddleware().process_response(get, resp)
+
+    for key, (active, rollout) in get.waffles.items():
+        cookie = f'dwf_{key}'
+        assert cookie in resp.cookies
+        assert str(active) == resp.cookies[cookie].value
+
+        if active:
+            assert resp.cookies[cookie]['max-age'] == MAX_AGE
+        else:
+            assert not resp.cookies[cookie]['max-age']
 
 
 def test_testing_cookies():

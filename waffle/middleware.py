@@ -14,8 +14,7 @@ class WaffleMiddleware(MiddlewareMixin):
             for k in request.waffles:
                 name = smart_str(get_setting('COOKIE') % k)
                 active, rollout = request.waffles[k]
-                if rollout and not active:
-                    # "Inactive" is a session cookie during rollout mode.
+                if not active:
                     age = None
                 else:
                     age = max_age
