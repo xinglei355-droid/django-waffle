@@ -17,11 +17,13 @@ class BaseManager(models.Manager, Generic[_BaseModelType]):
     def get_by_natural_key(self, name: str) -> _BaseModelType:
         return self.get(name=name)
 
-    def create(self, *args: Any, **kwargs: Any) -> _BaseModelType:
+    def _flush_cache(self) -> None:
         cache = get_cache()
+        cache.delete(get_setting(self.KEY_SETTING))
+
+    def create(self, *args: Any, **kwargs: Any) -> _BaseModelType:
         ret = super().create(*args, **kwargs)
-        cache_key = get_setting(self.KEY_SETTING)
-        cache.delete(cache_key)
+        self._flush_cache()
         return ret
 
 

@@ -1,0 +1,239 @@
+diff --git a/waffle/managers.py b/waffle/managers.py
+index 2694261..67f1c97 100644
+--- a/waffle/managers.py
++++ b/waffle/managers.py
+@@ -17,11 +17,13 @@ class BaseManager(models.Manager, Generic[_BaseModelType]):
+     def get_by_natural_key(self, name: str) -> _BaseModelType:
+         return self.get(name=name)
+ 
+-    def create(self, *args: Any, **kwargs: Any) -> _BaseModelType:
++    def _flush_cache(self) -> None:
+         cache = get_cache()
++        cache.delete(get_setting(self.KEY_SETTING))
++
++    def create(self, *args: Any, **kwargs: Any) -> _BaseModelType:
+         ret = super().create(*args, **kwargs)
+-        cache_key = get_setting(self.KEY_SETTING)
+-        cache.delete(cache_key)
++        self._flush_cache()
+         return ret
+ 
+ 
+diff --git a/waffle/models.py b/waffle/models.py
+index 6aa0d34..f3882a5 100644
+--- a/waffle/models.py
++++ b/waffle/models.py
+@@ -3,7 +3,7 @@ from __future__ import annotations
+ import logging
+ import random
+ from decimal import Decimal
+-from typing import Any, TypeVar
++from typing import Any, Callable, TypeVar
+ 
+ from django.conf import settings
+ from django.contrib.auth.models import AbstractBaseUser, Group
+@@ -26,6 +26,7 @@ CACHE_EMPTY = '-'
+ 
+ 
+ _BaseModelType = TypeVar("_BaseModelType", bound="BaseModel")
++_CacheValueType = TypeVar("_CacheValueType")
+ 
+ 
+ class BaseModel(models.Model):
+@@ -46,23 +47,38 @@ class BaseModel(models.Model):
+         return keyfmt(get_setting(cls.SINGLE_CACHE_KEY), name)
+ 
+     @classmethod
+-    def get(cls: type[_BaseModelType], name: str) -> _BaseModelType:
++    def _get_cache_value(
++        cls,
++        cache_key: str,
++        get_value: Callable[[], _CacheValueType | None],
++        get_empty: Callable[[], _CacheValueType],
++    ) -> _CacheValueType:
+         cache = get_cache()
+-        cache_key = cls._cache_key(name)
+         cached = cache.get(cache_key)
+         if cached == CACHE_EMPTY:
+-            return cls(name=name)
++            return get_empty()
+         if cached:
+             return cached
+ 
+-        try:
+-            obj = cls.get_from_db(name)
+-        except cls.DoesNotExist:
+-            cache.add(cache_key, CACHE_EMPTY)
+-            return cls(name=name)
++        value = get_value()
++        if value:
++            cache.add(cache_key, value)
++            return value
++
++        cache.add(cache_key, CACHE_EMPTY)
++        return get_empty()
++
++    @classmethod
++    def get(cls: type[_BaseModelType], name: str) -> _BaseModelType:
++        cache_key = cls._cache_key(name)
++
++        def get_value() -> _BaseModelType | None:
++            try:
++                return cls.get_from_db(name)
++            except cls.DoesNotExist:
++                return None
+ 
+-        cache.add(cache_key, obj)
+-        return obj
++        return cls._get_cache_value(cache_key, get_value, lambda: cls(name=name))
+ 
+     @classmethod
+     def get_from_db(cls: type[_BaseModelType], name: str) -> _BaseModelType:
+@@ -73,21 +89,8 @@ class BaseModel(models.Model):
+ 
+     @classmethod
+     def get_all(cls: type[_BaseModelType]) -> list[_BaseModelType]:
+-        cache = get_cache()
+         cache_key = get_setting(cls.ALL_CACHE_KEY)
+-        cached = cache.get(cache_key)
+-        if cached == CACHE_EMPTY:
+-            return []
+-        if cached:
+-            return cached
+-
+-        objs = cls.get_all_from_db()
+-        if not objs:
+-            cache.add(cache_key, CACHE_EMPTY)
+-            return []
+-
+-        cache.add(cache_key, objs)
+-        return objs
++        return cls._get_cache_value(cache_key, cls.get_all_from_db, lambda: [])
+ 
+     @classmethod
+     def get_all_from_db(cls: type[_BaseModelType]) -> list[_BaseModelType]:
+@@ -307,7 +310,7 @@ class AbstractBaseFlag(BaseModel):
+         elif self.everyone is False:
+             return False
+ 
+-        if self.testing:  # Testing mode is on.
++        if self.testing:
+             tc = get_setting('TEST_COOKIE') % self.name
+             th = tc.replace('_', '-')
+             on = None
+diff --git a/waffle/tests/test_models.py b/waffle/tests/test_models.py
+index fbe72c1..039b6b0 100644
+--- a/waffle/tests/test_models.py
++++ b/waffle/tests/test_models.py
+@@ -1,14 +1,23 @@
+-from django.test import TestCase
++from django.contrib.auth.models import User
+ 
+ from waffle import (
+     get_waffle_flag_model,
+     get_waffle_sample_model,
+     get_waffle_switch_model,
+ )
+-from django.contrib.auth.models import User
++from waffle.models import CACHE_EMPTY
++from waffle.tests.base import TestCase
++from waffle.utils import get_cache, get_setting
+ 
+ 
+ class ModelsTests(TestCase):
++    def model_cases(self):
++        return (
++            ('flag', get_waffle_flag_model(), {}),
++            ('switch', get_waffle_switch_model(), {}),
++            ('sample', get_waffle_sample_model(), {'percent': 0}),
++        )
++
+     def test_natural_keys(self):
+         flag = get_waffle_flag_model().objects.create(name='test-flag')
+         switch = get_waffle_switch_model().objects.create(name='test-switch')
+@@ -36,3 +45,85 @@ class ModelsTests(TestCase):
+         flag = get_waffle_flag_model().objects.create(name='test-flag')
+         flag.everyone = True
+         self.assertEqual(flag.is_active_for_user(User()), True)
++
++    def test_get_returns_missing_object_and_caches_empty_sentinel(self):
++        cache = get_cache()
++
++        for label, model, _create_kwargs in self.model_cases():
++            with self.subTest(model=label):
++                missing = model.get('missing')
++
++                self.assertEqual(missing.name, 'missing')
++                self.assertIsNone(missing.pk)
++                self.assertEqual(cache.get(model._cache_key('missing')), CACHE_EMPTY)
++
++                with self.assertNumQueries(0):
++                    cached_missing = model.get('missing')
++
++                self.assertEqual(cached_missing.name, 'missing')
++                self.assertIsNone(cached_missing.pk)
++
++    def test_get_reads_from_database_and_caches_value(self):
++        cache = get_cache()
++
++        for label, model, create_kwargs in self.model_cases():
++            with self.subTest(model=label):
++                name = f'{label}-db'
++                model.objects.create(name=name, **create_kwargs)
++
++                with self.assertNumQueries(1):
++                    cached_obj = model.get(name)
++
++                self.assertEqual(cached_obj.name, name)
++                self.assertEqual(cache.get(model._cache_key(name)).name, name)
++
++    def test_get_all_returns_empty_list_and_caches_empty_sentinel(self):
++        cache = get_cache()
++
++        for label, model, _create_kwargs in self.model_cases():
++            with self.subTest(model=label):
++                self.assertEqual(model.get_all(), [])
++                self.assertEqual(cache.get(get_setting(model.ALL_CACHE_KEY)), CACHE_EMPTY)
++
++                with self.assertNumQueries(0):
++                    self.assertEqual(model.get_all(), [])
++
++    def test_get_and_get_all_use_cached_values_without_database_reads(self):
++        cache = get_cache()
++
++        for label, model, create_kwargs in self.model_cases():
++            with self.subTest(model=label):
++                name = f'{label}-cached'
++                obj = model.objects.create(name=name, **create_kwargs)
++                cache.set(model._cache_key(name), obj)
++                cache.set(get_setting(model.ALL_CACHE_KEY), [obj])
++
++                with self.assertNumQueries(0):
++                    cached_obj = model.get(name)
++                    cached_objs = model.get_all()
++
++                self.assertEqual(cached_obj.name, name)
++                self.assertEqual([cached.name for cached in cached_objs], [name])
++
++    def test_create_invalidates_all_cache_and_get_all_reads_from_database(self):
++        cache = get_cache()
++
++        for label, model, create_kwargs in self.model_cases():
++            with self.subTest(model=label):
++                name = f'{label}-created'
++
++                self.assertEqual(model.get_all(), [])
++                self.assertEqual(cache.get(get_setting(model.ALL_CACHE_KEY)), CACHE_EMPTY)
++
++                model.objects.create(name=name, **create_kwargs)
++
++                self.assertIsNone(cache.get(get_setting(model.ALL_CACHE_KEY)))
++
++                with self.assertNumQueries(1):
++                    objs = model.get_all()
++
++                self.assertEqual([obj.name for obj in objs], [name])
++                self.assertEqual(
++                    [obj.name for obj in cache.get(get_setting(model.ALL_CACHE_KEY))],
++                    [name],
++                )

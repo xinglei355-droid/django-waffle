@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import random
 from decimal import Decimal
-from typing import Any, TypeVar
+from typing import Any, Callable, TypeVar
 
 from django.conf import settings
 from django.contrib.auth.models import AbstractBaseUser, Group
@@ -26,6 +26,7 @@ CACHE_EMPTY = '-'
 
 
 _BaseModelType = TypeVar("_BaseModelType", bound="BaseModel")
+_CacheValueType = TypeVar("_CacheValueType")
 
 
 class BaseModel(models.Model):
@@ -46,23 +47,38 @@ class BaseModel(models.Model):
         return keyfmt(get_setting(cls.SINGLE_CACHE_KEY), name)
 
     @classmethod
-    def get(cls: type[_BaseModelType], name: str) -> _BaseModelType:
+    def _get_cache_value(
+        cls,
+        cache_key: str,
+        get_value: Callable[[], _CacheValueType | None],
+        get_empty: Callable[[], _CacheValueType],
+    ) -> _CacheValueType:
         cache = get_cache()
-        cache_key = cls._cache_key(name)
         cached = cache.get(cache_key)
         if cached == CACHE_EMPTY:
-            return cls(name=name)
+            return get_empty()
         if cached:
             return cached
 
-        try:
-            obj = cls.get_from_db(name)
-        except cls.DoesNotExist:
-            cache.add(cache_key, CACHE_EMPTY)
-            return cls(name=name)
+        value = get_value()
+        if value:
+            cache.add(cache_key, value)
+            return value
 
-        cache.add(cache_key, obj)
-        return obj
+        cache.add(cache_key, CACHE_EMPTY)
+        return get_empty()
+
+    @classmethod
+    def get(cls: type[_BaseModelType], name: str) -> _BaseModelType:
+        cache_key = cls._cache_key(name)
+
+        def get_value() -> _BaseModelType | None:
+            try:
+                return cls.get_from_db(name)
+            except cls.DoesNotExist:
+                return None
+
+        return cls._get_cache_value(cache_key, get_value, lambda: cls(name=name))
 
     @classmethod
     def get_from_db(cls: type[_BaseModelType], name: str) -> _BaseModelType:
@@ -73,21 +89,8 @@ class BaseModel(models.Model):
 
     @classmethod
     def get_all(cls: type[_BaseModelType]) -> list[_BaseModelType]:
-        cache = get_cache()
         cache_key = get_setting(cls.ALL_CACHE_KEY)
-        cached = cache.get(cache_key)
-        if cached == CACHE_EMPTY:
-            return []
-        if cached:
-            return cached
-
-        objs = cls.get_all_from_db()
-        if not objs:
-            cache.add(cache_key, CACHE_EMPTY)
-            return []
-
-        cache.add(cache_key, objs)
-        return objs
+        return cls._get_cache_value(cache_key, cls.get_all_from_db, lambda: [])
 
     @classmethod
     def get_all_from_db(cls: type[_BaseModelType]) -> list[_BaseModelType]:
@@ -307,7 +310,7 @@ class AbstractBaseFlag(BaseModel):
         elif self.everyone is False:
             return False
 
-        if self.testing:  # Testing mode is on.
+        if self.testing:
             tc = get_setting('TEST_COOKIE') % self.name
             th = tc.replace('_', '-')
             on = None
