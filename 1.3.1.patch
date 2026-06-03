@@ -1,0 +1,181 @@
+diff --git a/waffle/tests/test_models.py b/waffle/tests/test_models.py
+index fbe72c1..4906173 100644
+--- a/waffle/tests/test_models.py
++++ b/waffle/tests/test_models.py
+@@ -1,4 +1,5 @@
+-from django.test import TestCase
++from django.test import TestCase, override_settings
++from django.http import HttpRequest
+ 
+ from waffle import (
+     get_waffle_flag_model,
+@@ -36,3 +37,169 @@ class ModelsTests(TestCase):
+         flag = get_waffle_flag_model().objects.create(name='test-flag')
+         flag.everyone = True
+         self.assertEqual(flag.is_active_for_user(User()), True)
++
++
++class AbstractBaseFlagIsActiveTableDrivenTests(TestCase):
++    def setUp(self):
++        self.Flag = get_waffle_flag_model()
++
++    def _create_request(self, method='GET', GET=None, headers=None, COOKIES=None, user=None, LANGUAGE_CODE=None):
++        request = HttpRequest()
++        request.method = method
++        request.GET = GET or {}
++        request.META = headers or {}
++        request.COOKIES = COOKIES or {}
++        if user is not None:
++            request.user = user
++        if LANGUAGE_CODE is not None:
++            request.LANGUAGE_CODE = LANGUAGE_CODE
++        return request
++
++    def _create_user(self, is_authenticated=True, is_staff=False, is_superuser=False):
++        user = User.objects.create_user(
++            username=f'user_{is_authenticated}_{is_staff}_{is_superuser}',
++            email='test@example.com',
++            password='testpassword'
++        )
++        user.is_authenticated = is_authenticated
++        user.is_staff = is_staff
++        user.is_superuser = is_superuser
++        user.save()
++        return user
++
++    def test_is_active_table_driven(self):
++        test_cases = [
++            {
++                'name': 'OVERRIDE query parameter - flag=1',
++                'settings_override': {'WAFFLE_OVERRIDE': True},
++                'flag_kwargs': {'name': 'test-flag'},
++                'request_kwargs': {'GET': {'test-flag': '1'}},
++                'expected_active': True,
++                'expected_waffles': None,
++                'expected_waffle_tests': None,
++            },
++            {
++                'name': 'OVERRIDE query parameter - flag=0',
++                'settings_override': {'WAFFLE_OVERRIDE': True},
++                'flag_kwargs': {'name': 'test-flag'},
++                'request_kwargs': {'GET': {'test-flag': '0'}},
++                'expected_active': False,
++                'expected_waffles': None,
++                'expected_waffle_tests': None,
++            },
++            {
++                'name': 'testing query parameter',
++                'settings_override': {},
++                'flag_kwargs': {'name': 'test-flag', 'testing': True},
++                'request_kwargs': {'GET': {'dwft_test-flag': '1'}},
++                'expected_active': True,
++                'expected_waffles': None,
++                'expected_waffle_tests': {'test-flag': True},
++            },
++            {
++                'name': 'testing header',
++                'settings_override': {},
++                'flag_kwargs': {'name': 'test-flag', 'testing': True},
++                'request_kwargs': {'headers': {'dwft-test-flag': '1'}},
++                'expected_active': True,
++                'expected_waffles': None,
++                'expected_waffle_tests': {'test-flag': True},
++            },
++            {
++                'name': 'testing cookie',
++                'settings_override': {},
++                'flag_kwargs': {'name': 'test-flag', 'testing': True},
++                'request_kwargs': {'COOKIES': {'dwft_test-flag': 'True'}},
++                'expected_active': True,
++                'expected_waffles': None,
++                'expected_waffle_tests': None,
++            },
++            {
++                'name': 'language hit',
++                'settings_override': {},
++                'flag_kwargs': {'name': 'test-flag', 'languages': 'en,fr'},
++                'request_kwargs': {'LANGUAGE_CODE': 'en'},
++                'expected_active': True,
++                'expected_waffles': None,
++                'expected_waffle_tests': None,
++            },
++            {
++                'name': 'authenticated user hit',
++                'settings_override': {},
++                'flag_kwargs': {'name': 'test-flag', 'authenticated': True},
++                'request_kwargs': {'user': lambda: self._create_user(is_authenticated=True)},
++                'expected_active': True,
++                'expected_waffles': None,
++                'expected_waffle_tests': None,
++            },
++            {
++                'name': 'staff user hit',
++                'settings_override': {},
++                'flag_kwargs': {'name': 'test-flag', 'staff': True},
++                'request_kwargs': {'user': lambda: self._create_user(is_authenticated=True, is_staff=True)},
++                'expected_active': True,
++                'expected_waffles': None,
++                'expected_waffle_tests': None,
++            },
++            {
++                'name': 'superuser hit',
++                'settings_override': {},
++                'flag_kwargs': {'name': 'test-flag', 'superusers': True},
++                'request_kwargs': {'user': lambda: self._create_user(is_authenticated=True, is_superuser=True)},
++                'expected_active': True,
++                'expected_waffles': None,
++                'expected_waffle_tests': None,
++            },
++            {
++                'name': 'default False path',
++                'settings_override': {},
++                'flag_kwargs': {'name': 'test-flag'},
++                'request_kwargs': {},
++                'expected_active': False,
++                'expected_waffles': None,
++                'expected_waffle_tests': None,
++            },
++        ]
++
++        for test_case in test_cases:
++            with self.subTest(name=test_case['name']):
++                settings_override = test_case.get('settings_override', {})
++                if settings_override:
++                    with override_settings(**settings_override):
++                        self._run_single_test(test_case)
++                else:
++                    self._run_single_test(test_case)
++
++    def _run_single_test(self, test_case):
++        flag = self.Flag.objects.create(**test_case['flag_kwargs'])
++        
++        request_kwargs = test_case['request_kwargs'].copy()
++        if 'user' in request_kwargs and callable(request_kwargs['user']):
++            request_kwargs['user'] = request_kwargs['user']()
++        
++        request = self._create_request(**request_kwargs)
++        result = flag.is_active(request)
++        
++        self.assertEqual(result, test_case['expected_active'])
++        
++        if test_case['expected_waffles'] is not None:
++            self.assertTrue(hasattr(request, 'waffles'))
++            self.assertEqual(request.waffles, test_case['expected_waffles'])
++        else:
++            self.assertFalse(hasattr(request, 'waffles') or request.waffles == {})
++        
++        if test_case['expected_waffle_tests'] is not None:
++            self.assertTrue(hasattr(request, 'waffle_tests'))
++            self.assertEqual(request.waffle_tests, test_case['expected_waffle_tests'])
++        else:
++            self.assertFalse(hasattr(request, 'waffle_tests') or request.waffle_tests == {})
++
++    def test_percent_hit(self):
++        flag = self.Flag.objects.create(name='test-flag', percent=100.0)
++        request = self._create_request()
++        result = flag.is_active(request)
++        self.assertEqual(result, True)
++        self.assertTrue(hasattr(request, 'waffles'))
++        self.assertIn('test-flag', request.waffles)
++        self.assertEqual(request.waffles['test-flag'][0], True)
++
