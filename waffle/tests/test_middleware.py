@@ -1,5 +1,5 @@
 from django.http import HttpResponse
-from django.test import RequestFactory
+from django.test import RequestFactory, override_settings
 
 from waffle.middleware import WaffleMiddleware
 
@@ -21,6 +21,7 @@ def test_set_cookies():
     assert 'False' == resp.cookies['dwf_bar'].value
 
 
+@override_settings(WAFFLE_MAX_AGE=123)
 def test_rollout_cookies():
     get.waffles = {'foo': [True, True],
                    'bar': [False, True],
@@ -28,14 +29,11 @@ def test_rollout_cookies():
                    'qux': [False, False]}
     resp = HttpResponse()
     resp = WaffleMiddleware().process_response(get, resp)
-    for k in get.waffles:
-        cookie = f'dwf_{k}'
-        assert cookie in resp.cookies
-        assert str(get.waffles[k][0]) == resp.cookies[cookie].value
-        if get.waffles[k][1]:
-            assert bool(resp.cookies[cookie]['max-age']) == get.waffles[k][0]
-        else:
-            assert resp.cookies[cookie]['max-age']
+
+    assert resp.cookies['dwf_foo']['max-age'] == 123
+    assert resp.cookies['dwf_bar']['max-age'] == ''
+    assert resp.cookies['dwf_baz']['max-age'] == 123
+    assert resp.cookies['dwf_qux']['max-age'] == 123
 
 
 def test_testing_cookies():

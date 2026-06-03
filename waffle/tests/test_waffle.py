@@ -298,6 +298,23 @@ class WaffleTests(TestCase):
         response = process_request(request, views.flag_in_view)
         assert 'dwf_myflag' in response.cookies
 
+    def test_rollout_persisted_active_flag_uses_persistent_cookie(self):
+        waffle.get_waffle_flag_model().objects.create(name='myflag', percent='50.0', rollout=True)
+        request = get()
+        request.COOKIES['dwf_myflag'] = 'True'
+
+        assert waffle.flag_is_active(request, 'myflag')
+        assert request.waffles['myflag'] == [True, False]
+
+    @mock.patch.object(random, 'uniform')
+    def test_rollout_new_active_flag_uses_persistent_cookie(self, uniform):
+        uniform.return_value = '10'
+        waffle.get_waffle_flag_model().objects.create(name='myflag', percent='50.0', rollout=True)
+        request = get()
+
+        assert waffle.flag_is_active(request, 'myflag')
+        assert request.waffles['myflag'] == [True, False]
+
     @mock.patch.object(random, 'uniform')
     def test_reroll(self, uniform):
         """Even without a cookie, calling flag_is_active twice should return

@@ -1,0 +1,86 @@
+diff --git a/waffle/models.py b/waffle/models.py
+index 6aa0d34..4bb7a76 100644
+--- a/waffle/models.py
++++ b/waffle/models.py
+@@ -270,12 +270,12 @@ class AbstractBaseFlag(BaseModel):
+             if cookie in request.COOKIES:
+                 flag_active = request.COOKIES[cookie] == 'True'
+                 if not read_only:
+-                    set_flag(request, self.name, flag_active, self.rollout)
++                    set_flag(request, self.name, flag_active, self.rollout and not flag_active)
+                 return flag_active
+ 
+             if not read_only:
+                 if Decimal(str(random.uniform(0, 100))) <= self.percent:
+-                    set_flag(request, self.name, True, self.rollout)
++                    set_flag(request, self.name, True)
+                     return True
+                 set_flag(request, self.name, False, self.rollout)
+ 
+diff --git a/waffle/tests/test_middleware.py b/waffle/tests/test_middleware.py
+index 11af7c9..38c61cc 100644
+--- a/waffle/tests/test_middleware.py
++++ b/waffle/tests/test_middleware.py
+@@ -1,5 +1,5 @@
+ from django.http import HttpResponse
+-from django.test import RequestFactory
++from django.test import RequestFactory, override_settings
+ 
+ from waffle.middleware import WaffleMiddleware
+ 
+@@ -21,6 +21,7 @@ def test_set_cookies():
+     assert 'False' == resp.cookies['dwf_bar'].value
+ 
+ 
++@override_settings(WAFFLE_MAX_AGE=123)
+ def test_rollout_cookies():
+     get.waffles = {'foo': [True, True],
+                    'bar': [False, True],
+@@ -28,14 +29,11 @@ def test_rollout_cookies():
+                    'qux': [False, False]}
+     resp = HttpResponse()
+     resp = WaffleMiddleware().process_response(get, resp)
+-    for k in get.waffles:
+-        cookie = f'dwf_{k}'
+-        assert cookie in resp.cookies
+-        assert str(get.waffles[k][0]) == resp.cookies[cookie].value
+-        if get.waffles[k][1]:
+-            assert bool(resp.cookies[cookie]['max-age']) == get.waffles[k][0]
+-        else:
+-            assert resp.cookies[cookie]['max-age']
++
++    assert resp.cookies['dwf_foo']['max-age'] == 123
++    assert resp.cookies['dwf_bar']['max-age'] == ''
++    assert resp.cookies['dwf_baz']['max-age'] == 123
++    assert resp.cookies['dwf_qux']['max-age'] == 123
+ 
+ 
+ def test_testing_cookies():
+diff --git a/waffle/tests/test_waffle.py b/waffle/tests/test_waffle.py
+index d361c48..b10582d 100644
+--- a/waffle/tests/test_waffle.py
++++ b/waffle/tests/test_waffle.py
+@@ -298,6 +298,23 @@ class WaffleTests(TestCase):
+         response = process_request(request, views.flag_in_view)
+         assert 'dwf_myflag' in response.cookies
+ 
++    def test_rollout_persisted_active_flag_uses_persistent_cookie(self):
++        waffle.get_waffle_flag_model().objects.create(name='myflag', percent='50.0', rollout=True)
++        request = get()
++        request.COOKIES['dwf_myflag'] = 'True'
++
++        assert waffle.flag_is_active(request, 'myflag')
++        assert request.waffles['myflag'] == [True, False]
++
++    @mock.patch.object(random, 'uniform')
++    def test_rollout_new_active_flag_uses_persistent_cookie(self, uniform):
++        uniform.return_value = '10'
++        waffle.get_waffle_flag_model().objects.create(name='myflag', percent='50.0', rollout=True)
++        request = get()
++
++        assert waffle.flag_is_active(request, 'myflag')
++        assert request.waffles['myflag'] == [True, False]
++
+     @mock.patch.object(random, 'uniform')
+     def test_reroll(self, uniform):
+         """Even without a cookie, calling flag_is_active twice should return

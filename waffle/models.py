@@ -270,12 +270,12 @@ class AbstractBaseFlag(BaseModel):
             if cookie in request.COOKIES:
                 flag_active = request.COOKIES[cookie] == 'True'
                 if not read_only:
-                    set_flag(request, self.name, flag_active, self.rollout)
+                    set_flag(request, self.name, flag_active, self.rollout and not flag_active)
                 return flag_active
 
             if not read_only:
                 if Decimal(str(random.uniform(0, 100))) <= self.percent:
-                    set_flag(request, self.name, True, self.rollout)
+                    set_flag(request, self.name, True)
                     return True
                 set_flag(request, self.name, False, self.rollout)
 
