@@ -1,11 +1,13 @@
-from django.test import TestCase
+from unittest import mock
+from django.test import RequestFactory, TestCase
+from django.test.utils import override_settings
 
 from waffle import (
     get_waffle_flag_model,
     get_waffle_sample_model,
     get_waffle_switch_model,
 )
-from django.contrib.auth.models import User
+from django.contrib.auth.models import AnonymousUser, User
 
 
 class ModelsTests(TestCase):
@@ -36,3 +38,204 @@ class ModelsTests(TestCase):
         flag = get_waffle_flag_model().objects.create(name='test-flag')
         flag.everyone = True
         self.assertEqual(flag.is_active_for_user(User()), True)
+
+    @override_settings(
+        WAFFLE_OVERRIDE=True,
+        WAFFLE_TEST_COOKIE='dwft_%s',
+        WAFFLE_COOKIE='dwf_%s',
+    )
+    def test_flag_is_active_table_driven(self):
+        factory = RequestFactory()
+        
+        def make_request(get_params=None, headers=None, cookies=None, user=None, language_code=None):
+            req = factory.get('/foo', data=get_params or {})
+            if headers:
+                req.headers = headers
+            if cookies:
+                req.COOKIES = cookies
+            req.user = user or AnonymousUser()
+            if language_code:
+                req.LANGUAGE_CODE = language_code
+            return req
+
+        auth_user = mock.Mock(is_authenticated=True, is_staff=False, is_superuser=False)
+        staff_user = mock.Mock(is_authenticated=True, is_staff=True, is_superuser=False)
+        super_user = mock.Mock(is_authenticated=True, is_staff=True, is_superuser=True)
+
+        test_cases = [
+            {
+                'name': 'OVERRIDE query param true',
+                'flag_kwargs': {'name': 'test_flag'},
+                'request': make_request(get_params={'test_flag': '1'}),
+                'expected': True,
+                'expected_waffles': None,
+                'expected_waffle_tests': None,
+            },
+            {
+                'name': 'OVERRIDE query param false',
+                'flag_kwargs': {'name': 'test_flag'},
+                'request': make_request(get_params={'test_flag': '0'}),
+                'expected': False,
+                'expected_waffles': None,
+                'expected_waffle_tests': None,
+            },
+            {
+                'name': 'testing query param true',
+                'flag_kwargs': {'name': 'test_flag', 'testing': True},
+                'request': make_request(get_params={'dwft_test_flag': '1'}),
+                'expected': True,
+                'expected_waffles': None,
+                'expected_waffle_tests': {'test_flag': True},
+            },
+            {
+                'name': 'testing query param false',
+                'flag_kwargs': {'name': 'test_flag', 'testing': True},
+                'request': make_request(get_params={'dwft_test_flag': '0'}),
+                'expected': False,
+                'expected_waffles': None,
+                'expected_waffle_tests': {'test_flag': False},
+            },
+            {
+                'name': 'testing header true',
+                'flag_kwargs': {'name': 'test_flag', 'testing': True},
+                'request': make_request(headers={'dwft-test-flag': '1'}),
+                'expected': True,
+                'expected_waffles': None,
+                'expected_waffle_tests': {'test_flag': True},
+            },
+            {
+                'name': 'testing header false',
+                'flag_kwargs': {'name': 'test_flag', 'testing': True},
+                'request': make_request(headers={'dwft-test-flag': '0'}),
+                'expected': False,
+                'expected_waffles': None,
+                'expected_waffle_tests': {'test_flag': False},
+            },
+            {
+                'name': 'testing cookie true',
+                'flag_kwargs': {'name': 'test_flag', 'testing': True},
+                'request': make_request(cookies={'dwft_test_flag': 'True'}),
+                'expected': True,
+                'expected_waffles': None,
+                'expected_waffle_tests': None,
+            },
+            {
+                'name': 'testing cookie false',
+                'flag_kwargs': {'name': 'test_flag', 'testing': True},
+                'request': make_request(cookies={'dwft_test_flag': 'False'}),
+                'expected': False,
+                'expected_waffles': None,
+                'expected_waffle_tests': None,
+            },
+            {
+                'name': 'language match',
+                'flag_kwargs': {'name': 'test_flag', 'languages': 'en,fr'},
+                'request': make_request(language_code='fr'),
+                'expected': True,
+                'expected_waffles': None,
+                'expected_waffle_tests': None,
+            },
+            {
+                'name': 'language mismatch',
+                'flag_kwargs': {'name': 'test_flag', 'languages': 'en,es'},
+                'request': make_request(language_code='fr'),
+                'expected': False,
+                'expected_waffles': None,
+                'expected_waffle_tests': None,
+            },
+            {
+                'name': 'authenticated user match',
+                'flag_kwargs': {'name': 'test_flag', 'authenticated': True},
+                'request': make_request(user=auth_user),
+                'expected': True,
+                'expected_waffles': None,
+                'expected_waffle_tests': None,
+            },
+            {
+                'name': 'staff match',
+                'flag_kwargs': {'name': 'test_flag', 'staff': True},
+                'request': make_request(user=staff_user),
+                'expected': True,
+                'expected_waffles': None,
+                'expected_waffle_tests': None,
+            },
+            {
+                'name': 'superuser match',
+                'flag_kwargs': {'name': 'test_flag', 'superusers': True},
+                'request': make_request(user=super_user),
+                'expected': True,
+                'expected_waffles': None,
+                'expected_waffle_tests': None,
+            },
+            {
+                'name': 'percent cookie true',
+                'flag_kwargs': {'name': 'test_flag', 'percent': 50.0},
+                'request': make_request(cookies={'dwf_test_flag': 'True'}),
+                'expected': True,
+                'expected_waffles': {'test_flag': [True, False]},
+                'expected_waffle_tests': None,
+            },
+            {
+                'name': 'percent cookie false',
+                'flag_kwargs': {'name': 'test_flag', 'percent': 50.0},
+                'request': make_request(cookies={'dwf_test_flag': 'False'}),
+                'expected': False,
+                'expected_waffles': {'test_flag': [False, False]},
+                'expected_waffle_tests': None,
+            },
+            {
+                'name': 'percent random match',
+                'flag_kwargs': {'name': 'test_flag', 'percent': 50.0},
+                'request': make_request(),
+                'mock_random': 49.9,
+                'expected': True,
+                'expected_waffles': {'test_flag': [True, False]},
+                'expected_waffle_tests': None,
+            },
+            {
+                'name': 'percent random mismatch',
+                'flag_kwargs': {'name': 'test_flag', 'percent': 50.0},
+                'request': make_request(),
+                'mock_random': 50.1,
+                'expected': False,
+                'expected_waffles': {'test_flag': [False, False]},
+                'expected_waffle_tests': None,
+            },
+            {
+                'name': 'default False path',
+                'flag_kwargs': {'name': 'test_flag'},
+                'request': make_request(),
+                'expected': False,
+                'expected_waffles': None,
+                'expected_waffle_tests': None,
+            },
+        ]
+
+        FlagModel = get_waffle_flag_model()
+
+        for case in test_cases:
+            with self.subTest(case=case['name']):
+                FlagModel.objects.all().delete()
+                flag = FlagModel.objects.create(**case['flag_kwargs'])
+                
+                req = case['request']
+                
+                if 'mock_random' in case:
+                    with mock.patch('waffle.models.random.uniform', return_value=case['mock_random']):
+                        result = flag.is_active(req)
+                else:
+                    result = flag.is_active(req)
+
+                self.assertEqual(result, case['expected'])
+
+                if case['expected_waffles'] is not None:
+                    self.assertTrue(hasattr(req, 'waffles'))
+                    self.assertEqual(req.waffles, case['expected_waffles'])
+                else:
+                    self.assertFalse(hasattr(req, 'waffles'))
+                
+                if case['expected_waffle_tests'] is not None:
+                    self.assertTrue(hasattr(req, 'waffle_tests'))
+                    self.assertEqual(req.waffle_tests, case['expected_waffle_tests'])
+                else:
+                    self.assertFalse(hasattr(req, 'waffle_tests'))
