@@ -14,14 +14,17 @@ else:
 class BaseManager(models.Manager, Generic[_BaseModelType]):
     KEY_SETTING = ''
 
+    def _invalidate_all_cache(self) -> None:
+        cache = get_cache()
+        cache_key = get_setting(self.KEY_SETTING)
+        cache.delete(cache_key)
+
     def get_by_natural_key(self, name: str) -> _BaseModelType:
         return self.get(name=name)
 
     def create(self, *args: Any, **kwargs: Any) -> _BaseModelType:
-        cache = get_cache()
         ret = super().create(*args, **kwargs)
-        cache_key = get_setting(self.KEY_SETTING)
-        cache.delete(cache_key)
+        self._invalidate_all_cache()
         return ret
 
 

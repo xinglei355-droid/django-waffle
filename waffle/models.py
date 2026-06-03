@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import random
 from decimal import Decimal
-from typing import Any, TypeVar
+from typing import Any, Callable, TypeVar
 
 from django.conf import settings
 from django.contrib.auth.models import AbstractBaseUser, Group
@@ -46,23 +46,38 @@ class BaseModel(models.Model):
         return keyfmt(get_setting(cls.SINGLE_CACHE_KEY), name)
 
     @classmethod
-    def get(cls: type[_BaseModelType], name: str) -> _BaseModelType:
+    def _get_or_set_cache(
+        cls: type[_BaseModelType],
+        cache_key: str,
+        db_fetcher: Callable[[], _BaseModelType | list[_BaseModelType] | None],
+        empty_value: _BaseModelType | list[_BaseModelType],
+    ) -> _BaseModelType | list[_BaseModelType]:
         cache = get_cache()
-        cache_key = cls._cache_key(name)
         cached = cache.get(cache_key)
         if cached == CACHE_EMPTY:
-            return cls(name=name)
+            return empty_value
         if cached:
             return cached
 
-        try:
-            obj = cls.get_from_db(name)
-        except cls.DoesNotExist:
+        result = db_fetcher()
+        if not result:
             cache.add(cache_key, CACHE_EMPTY)
-            return cls(name=name)
+            return empty_value
 
-        cache.add(cache_key, obj)
-        return obj
+        cache.add(cache_key, result)
+        return result
+
+    @classmethod
+    def get(cls: type[_BaseModelType], name: str) -> _BaseModelType:
+        cache_key = cls._cache_key(name)
+
+        def _db_fetch() -> _BaseModelType | None:
+            try:
+                return cls.get_from_db(name)
+            except cls.DoesNotExist:
+                return None
+
+        return cls._get_or_set_cache(cache_key, _db_fetch, cls(name=name))
 
     @classmethod
     def get_from_db(cls: type[_BaseModelType], name: str) -> _BaseModelType:
@@ -73,21 +88,8 @@ class BaseModel(models.Model):
 
     @classmethod
     def get_all(cls: type[_BaseModelType]) -> list[_BaseModelType]:
-        cache = get_cache()
         cache_key = get_setting(cls.ALL_CACHE_KEY)
-        cached = cache.get(cache_key)
-        if cached == CACHE_EMPTY:
-            return []
-        if cached:
-            return cached
-
-        objs = cls.get_all_from_db()
-        if not objs:
-            cache.add(cache_key, CACHE_EMPTY)
-            return []
-
-        cache.add(cache_key, objs)
-        return objs
+        return cls._get_or_set_cache(cache_key, cls.get_all_from_db, [])
 
     @classmethod
     def get_all_from_db(cls: type[_BaseModelType]) -> list[_BaseModelType]:
@@ -366,38 +368,20 @@ class AbstractUserFlag(AbstractBaseFlag):
         return flush_keys
 
     def _get_user_ids(self) -> set[Any]:
-        cache = get_cache()
         cache_key = keyfmt(get_setting('FLAG_USERS_CACHE_KEY'), self.name)
-        cached = cache.get(cache_key)
-        if cached == CACHE_EMPTY:
-            return set()
-        if cached:
-            return cached
-
-        user_ids = set(self.users.all().values_list('pk', flat=True))
-        if not user_ids:
-            cache.add(cache_key, CACHE_EMPTY)
-            return set()
-
-        cache.add(cache_key, user_ids)
-        return user_ids
+        return self._get_or_set_cache(
+            cache_key,
+            lambda: set(self.users.all().values_list('pk', flat=True)),
+            set(),
+        )
 
     def _get_group_ids(self) -> set[Any]:
-        cache = get_cache()
         cache_key = keyfmt(get_setting('FLAG_GROUPS_CACHE_KEY'), self.name)
-        cached = cache.get(cache_key)
-        if cached == CACHE_EMPTY:
-            return set()
-        if cached:
-            return cached
-
-        group_ids = set(self.groups.all().values_list('pk', flat=True))
-        if not group_ids:
-            cache.add(cache_key, CACHE_EMPTY)
-            return set()
-
-        cache.add(cache_key, group_ids)
-        return group_ids
+        return self._get_or_set_cache(
+            cache_key,
+            lambda: set(self.groups.all().values_list('pk', flat=True)),
+            set(),
+        )
 
     def is_active_for_user(self, user: AbstractBaseUser) -> bool | None:
         is_active = super().is_active_for_user(user)
