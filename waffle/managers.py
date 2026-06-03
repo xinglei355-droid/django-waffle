@@ -12,26 +12,17 @@ else:
 
 
 class BaseManager(models.Manager, Generic[_BaseModelType]):
-    KEY_SETTING = ''
-
     def get_by_natural_key(self, name: str) -> _BaseModelType:
         return self.get(name=name)
 
-    def create(self, *args: Any, **kwargs: Any) -> _BaseModelType:
-        cache = get_cache()
-        ret = super().create(*args, **kwargs)
-        cache_key = get_setting(self.KEY_SETTING)
-        cache.delete(cache_key)
-        return ret
-
 
 class FlagManager(BaseManager['AbstractBaseFlag']):
-    KEY_SETTING = 'ALL_FLAGS_CACHE_KEY'
+    pass
 
 
 class SwitchManager(BaseManager['AbstractBaseSwitch']):
-    KEY_SETTING = 'ALL_SWITCHES_CACHE_KEY'
+    pass
 
 
 class SampleManager(BaseManager['AbstractBaseSample']):
-    KEY_SETTING = 'ALL_SAMPLES_CACHE_KEY'
+    pass

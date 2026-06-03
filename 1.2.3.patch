@@ -1,0 +1,284 @@
+diff --git a/test_app/models.py b/test_app/models.py
+index 884dce4..c187e9a 100644
+--- a/test_app/models.py
++++ b/test_app/models.py
+@@ -3,7 +3,7 @@ from django.db import models
+ from django.db.models import CASCADE
+ from django.utils.translation import gettext_lazy as _
+ 
+-from waffle.models import AbstractBaseSample, AbstractBaseSwitch, AbstractUserFlag, CACHE_EMPTY
++from waffle.models import AbstractBaseSample, AbstractBaseSwitch, AbstractUserFlag, CACHE_EMPTY, _cache_get_or_set
+ from waffle.utils import get_setting, keyfmt, get_cache
+ 
+ cache = get_cache()
+@@ -62,20 +62,11 @@ class CompanyAwareFlag(AbstractUserFlag):
+                 return True
+ 
+     def _get_company_ids(self):
+-        cache_key = keyfmt(
+-            get_setting(CompanyAwareFlag.FLAG_COMPANIES_CACHE_KEY, CompanyAwareFlag.FLAG_COMPANIES_CACHE_KEY_DEFAULT),
+-            self.name
++        return _cache_get_or_set(
++            keyfmt(
++                get_setting(CompanyAwareFlag.FLAG_COMPANIES_CACHE_KEY, CompanyAwareFlag.FLAG_COMPANIES_CACHE_KEY_DEFAULT),
++                self.name
++            ),
++            lambda: set(self.companies.all().values_list('pk', flat=True)),
++            empty_value=set()
+         )
+-        cached = cache.get(cache_key)
+-        if cached == CACHE_EMPTY:
+-            return set()
+-        if cached:
+-            return cached
+-
+-        company_ids = set(self.companies.all().values_list('pk', flat=True))
+-        if not company_ids:
+-            cache.add(cache_key, CACHE_EMPTY)
+-            return set()
+-
+-        cache.add(cache_key, company_ids)
+-        return company_ids
+diff --git a/waffle/managers.py b/waffle/managers.py
+index 2694261..563a1ce 100644
+--- a/waffle/managers.py
++++ b/waffle/managers.py
+@@ -12,26 +12,17 @@ else:
+ 
+ 
+ class BaseManager(models.Manager, Generic[_BaseModelType]):
+-    KEY_SETTING = ''
+-
+     def get_by_natural_key(self, name: str) -> _BaseModelType:
+         return self.get(name=name)
+ 
+-    def create(self, *args: Any, **kwargs: Any) -> _BaseModelType:
+-        cache = get_cache()
+-        ret = super().create(*args, **kwargs)
+-        cache_key = get_setting(self.KEY_SETTING)
+-        cache.delete(cache_key)
+-        return ret
+-
+ 
+ class FlagManager(BaseManager['AbstractBaseFlag']):
+-    KEY_SETTING = 'ALL_FLAGS_CACHE_KEY'
++    pass
+ 
+ 
+ class SwitchManager(BaseManager['AbstractBaseSwitch']):
+-    KEY_SETTING = 'ALL_SWITCHES_CACHE_KEY'
++    pass
+ 
+ 
+ class SampleManager(BaseManager['AbstractBaseSample']):
+-    KEY_SETTING = 'ALL_SAMPLES_CACHE_KEY'
++    pass
+diff --git a/waffle/models.py b/waffle/models.py
+index 6aa0d34..1dd7c80 100644
+--- a/waffle/models.py
++++ b/waffle/models.py
+@@ -25,6 +25,23 @@ logger = logging.getLogger('waffle')
+ CACHE_EMPTY = '-'
+ 
+ 
++def _cache_get_or_set(cache_key: str, db_callable: Any, empty_value: Any = None, empty_callable: Any = None) -> Any:
++    cache = get_cache()
++    cached = cache.get(cache_key)
++    if cached == CACHE_EMPTY:
++        return empty_callable() if empty_callable else empty_value
++    if cached is not None:
++        return cached
++
++    obj = db_callable()
++    if not obj:
++        cache.add(cache_key, CACHE_EMPTY)
++        return empty_callable() if empty_callable else empty_value
++
++    cache.add(cache_key, obj)
++    return obj
++
++
+ _BaseModelType = TypeVar("_BaseModelType", bound="BaseModel")
+ 
+ 
+@@ -47,22 +64,17 @@ class BaseModel(models.Model):
+ 
+     @classmethod
+     def get(cls: type[_BaseModelType], name: str) -> _BaseModelType:
+-        cache = get_cache()
+-        cache_key = cls._cache_key(name)
+-        cached = cache.get(cache_key)
+-        if cached == CACHE_EMPTY:
+-            return cls(name=name)
+-        if cached:
+-            return cached
+-
+-        try:
+-            obj = cls.get_from_db(name)
+-        except cls.DoesNotExist:
+-            cache.add(cache_key, CACHE_EMPTY)
+-            return cls(name=name)
+-
+-        cache.add(cache_key, obj)
+-        return obj
++        def fetch_db() -> _BaseModelType | None:
++            try:
++                return cls.get_from_db(name)
++            except cls.DoesNotExist:
++                return None
++
++        return _cache_get_or_set(
++            cls._cache_key(name),
++            fetch_db,
++            empty_callable=lambda: cls(name=name)
++        )
+ 
+     @classmethod
+     def get_from_db(cls: type[_BaseModelType], name: str) -> _BaseModelType:
+@@ -73,21 +85,11 @@ class BaseModel(models.Model):
+ 
+     @classmethod
+     def get_all(cls: type[_BaseModelType]) -> list[_BaseModelType]:
+-        cache = get_cache()
+-        cache_key = get_setting(cls.ALL_CACHE_KEY)
+-        cached = cache.get(cache_key)
+-        if cached == CACHE_EMPTY:
+-            return []
+-        if cached:
+-            return cached
+-
+-        objs = cls.get_all_from_db()
+-        if not objs:
+-            cache.add(cache_key, CACHE_EMPTY)
+-            return []
+-
+-        cache.add(cache_key, objs)
+-        return objs
++        return _cache_get_or_set(
++            get_setting(cls.ALL_CACHE_KEY),
++            cls.get_all_from_db,
++            empty_value=[]
++        )
+ 
+     @classmethod
+     def get_all_from_db(cls: type[_BaseModelType]) -> list[_BaseModelType]:
+@@ -366,38 +368,18 @@ class AbstractUserFlag(AbstractBaseFlag):
+         return flush_keys
+ 
+     def _get_user_ids(self) -> set[Any]:
+-        cache = get_cache()
+-        cache_key = keyfmt(get_setting('FLAG_USERS_CACHE_KEY'), self.name)
+-        cached = cache.get(cache_key)
+-        if cached == CACHE_EMPTY:
+-            return set()
+-        if cached:
+-            return cached
+-
+-        user_ids = set(self.users.all().values_list('pk', flat=True))
+-        if not user_ids:
+-            cache.add(cache_key, CACHE_EMPTY)
+-            return set()
+-
+-        cache.add(cache_key, user_ids)
+-        return user_ids
++        return _cache_get_or_set(
++            keyfmt(get_setting('FLAG_USERS_CACHE_KEY'), self.name),
++            lambda: set(self.users.all().values_list('pk', flat=True)),
++            empty_value=set()
++        )
+ 
+     def _get_group_ids(self) -> set[Any]:
+-        cache = get_cache()
+-        cache_key = keyfmt(get_setting('FLAG_GROUPS_CACHE_KEY'), self.name)
+-        cached = cache.get(cache_key)
+-        if cached == CACHE_EMPTY:
+-            return set()
+-        if cached:
+-            return cached
+-
+-        group_ids = set(self.groups.all().values_list('pk', flat=True))
+-        if not group_ids:
+-            cache.add(cache_key, CACHE_EMPTY)
+-            return set()
+-
+-        cache.add(cache_key, group_ids)
+-        return group_ids
++        return _cache_get_or_set(
++            keyfmt(get_setting('FLAG_GROUPS_CACHE_KEY'), self.name),
++            lambda: set(self.groups.all().values_list('pk', flat=True)),
++            empty_value=set()
++        )
+ 
+     def is_active_for_user(self, user: AbstractBaseUser) -> bool | None:
+         is_active = super().is_active_for_user(user)
+diff --git a/waffle/tests/test_models.py b/waffle/tests/test_models.py
+index fbe72c1..d2b1f85 100644
+--- a/waffle/tests/test_models.py
++++ b/waffle/tests/test_models.py
+@@ -6,7 +6,66 @@ from waffle import (
+     get_waffle_switch_model,
+ )
+ from django.contrib.auth.models import User
++from waffle.models import _cache_get_or_set, CACHE_EMPTY
++from waffle.utils import get_cache
+ 
++class CacheGetOrSetTests(TestCase):
++    def setUp(self):
++        self.cache = get_cache()
++        self.cache.clear()
++        
++    def test_cache_miss_db_hit(self):
++        # 数据库读取
++        db_calls = []
++        def fetch_db():
++            db_calls.append(1)
++            return 'db_value'
++            
++        res = _cache_get_or_set('my_key', fetch_db, empty_value='empty')
++        self.assertEqual(res, 'db_value')
++        self.assertEqual(len(db_calls), 1)
++        self.assertEqual(self.cache.get('my_key'), 'db_value')
++        
++    def test_cache_hit(self):
++        # 命中缓存
++        self.cache.set('my_key', 'cached_value')
++        db_calls = []
++        def fetch_db():
++            db_calls.append(1)
++            return 'db_value'
++            
++        res = _cache_get_or_set('my_key', fetch_db, empty_value='empty')
++        self.assertEqual(res, 'cached_value')
++        self.assertEqual(len(db_calls), 0)
++
++    def test_db_miss_caches_empty(self):
++        # 缺失对象
++        db_calls = []
++        def fetch_db():
++            db_calls.append(1)
++            return None
++            
++        res = _cache_get_or_set('my_key', fetch_db, empty_value='empty')
++        self.assertEqual(res, 'empty')
++        self.assertEqual(len(db_calls), 1)
++        self.assertEqual(self.cache.get('my_key'), CACHE_EMPTY)
++        
++        # Second call should hit cache and return empty_value without db call
++        res2 = _cache_get_or_set('my_key', fetch_db, empty_value='empty')
++        self.assertEqual(res2, 'empty')
++        self.assertEqual(len(db_calls), 1)
++
++    def test_db_returns_empty_list(self):
++        # 空列表
++        db_calls = []
++        def fetch_db():
++            db_calls.append(1)
++            return []
++            
++        res = _cache_get_or_set('my_key', fetch_db, empty_value=[])
++        self.assertEqual(res, [])
++        self.assertEqual(len(db_calls), 1)
++        self.assertEqual(self.cache.get('my_key'), CACHE_EMPTY)
+ 
+ class ModelsTests(TestCase):
+     def test_natural_keys(self):

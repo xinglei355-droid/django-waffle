@@ -3,7 +3,7 @@ from django.db import models
 from django.db.models import CASCADE
 from django.utils.translation import gettext_lazy as _
 
-from waffle.models import AbstractBaseSample, AbstractBaseSwitch, AbstractUserFlag, CACHE_EMPTY
+from waffle.models import AbstractBaseSample, AbstractBaseSwitch, AbstractUserFlag, CACHE_EMPTY, _cache_get_or_set
 from waffle.utils import get_setting, keyfmt, get_cache
 
 cache = get_cache()
@@ -62,20 +62,11 @@ class CompanyAwareFlag(AbstractUserFlag):
                 return True
 
     def _get_company_ids(self):
-        cache_key = keyfmt(
-            get_setting(CompanyAwareFlag.FLAG_COMPANIES_CACHE_KEY, CompanyAwareFlag.FLAG_COMPANIES_CACHE_KEY_DEFAULT),
-            self.name
+        return _cache_get_or_set(
+            keyfmt(
+                get_setting(CompanyAwareFlag.FLAG_COMPANIES_CACHE_KEY, CompanyAwareFlag.FLAG_COMPANIES_CACHE_KEY_DEFAULT),
+                self.name
+            ),
+            lambda: set(self.companies.all().values_list('pk', flat=True)),
+            empty_value=set()
         )
-        cached = cache.get(cache_key)
-        if cached == CACHE_EMPTY:
-            return set()
-        if cached:
-            return cached
-
-        company_ids = set(self.companies.all().values_list('pk', flat=True))
-        if not company_ids:
-            cache.add(cache_key, CACHE_EMPTY)
-            return set()
-
-        cache.add(cache_key, company_ids)
-        return company_ids

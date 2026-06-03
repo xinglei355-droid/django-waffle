@@ -6,7 +6,66 @@ from waffle import (
     get_waffle_switch_model,
 )
 from django.contrib.auth.models import User
+from waffle.models import _cache_get_or_set, CACHE_EMPTY
+from waffle.utils import get_cache
 
+class CacheGetOrSetTests(TestCase):
+    def setUp(self):
+        self.cache = get_cache()
+        self.cache.clear()
+        
+    def test_cache_miss_db_hit(self):
+        # 数据库读取
+        db_calls = []
+        def fetch_db():
+            db_calls.append(1)
+            return 'db_value'
+            
+        res = _cache_get_or_set('my_key', fetch_db, empty_value='empty')
+        self.assertEqual(res, 'db_value')
+        self.assertEqual(len(db_calls), 1)
+        self.assertEqual(self.cache.get('my_key'), 'db_value')
+        
+    def test_cache_hit(self):
+        # 命中缓存
+        self.cache.set('my_key', 'cached_value')
+        db_calls = []
+        def fetch_db():
+            db_calls.append(1)
+            return 'db_value'
+            
+        res = _cache_get_or_set('my_key', fetch_db, empty_value='empty')
+        self.assertEqual(res, 'cached_value')
+        self.assertEqual(len(db_calls), 0)
+
+    def test_db_miss_caches_empty(self):
+        # 缺失对象
+        db_calls = []
+        def fetch_db():
+            db_calls.append(1)
+            return None
+            
+        res = _cache_get_or_set('my_key', fetch_db, empty_value='empty')
+        self.assertEqual(res, 'empty')
+        self.assertEqual(len(db_calls), 1)
+        self.assertEqual(self.cache.get('my_key'), CACHE_EMPTY)
+        
+        # Second call should hit cache and return empty_value without db call
+        res2 = _cache_get_or_set('my_key', fetch_db, empty_value='empty')
+        self.assertEqual(res2, 'empty')
+        self.assertEqual(len(db_calls), 1)
+
+    def test_db_returns_empty_list(self):
+        # 空列表
+        db_calls = []
+        def fetch_db():
+            db_calls.append(1)
+            return []
+            
+        res = _cache_get_or_set('my_key', fetch_db, empty_value=[])
+        self.assertEqual(res, [])
+        self.assertEqual(len(db_calls), 1)
+        self.assertEqual(self.cache.get('my_key'), CACHE_EMPTY)
 
 class ModelsTests(TestCase):
     def test_natural_keys(self):
