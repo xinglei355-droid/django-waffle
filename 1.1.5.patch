@@ -1,0 +1,125 @@
+diff --git a/waffle/models.py b/waffle/models.py
+index 6aa0d34..25590fd 100644
+--- a/waffle/models.py
++++ b/waffle/models.py
+@@ -278,6 +278,7 @@ class AbstractBaseFlag(BaseModel):
+                     set_flag(request, self.name, True, self.rollout)
+                     return True
+                 set_flag(request, self.name, False, self.rollout)
++                return False
+ 
+         return None
+ 
+diff --git a/waffle/tests/test_middleware.py b/waffle/tests/test_middleware.py
+index 11af7c9..3ac2549 100644
+--- a/waffle/tests/test_middleware.py
++++ b/waffle/tests/test_middleware.py
+@@ -2,6 +2,7 @@ from django.http import HttpResponse
+ from django.test import RequestFactory
+ 
+ from waffle.middleware import WaffleMiddleware
++from waffle.utils import get_setting
+ 
+ 
+ get = RequestFactory().get('/foo')
+@@ -38,6 +39,24 @@ def test_rollout_cookies():
+             assert resp.cookies[cookie]['max-age']
+ 
+ 
++def test_rollout_cookie_max_age_combinations():
++    max_age = str(get_setting('MAX_AGE'))
++    req = RequestFactory().get('/foo')
++    req.waffles = {
++        'active_rollout': [True, True],
++        'inactive_rollout': [False, True],
++        'active_no_rollout': [True, False],
++        'inactive_no_rollout': [False, False],
++    }
++    resp = HttpResponse()
++    resp = WaffleMiddleware().process_response(req, resp)
++
++    assert resp.cookies['dwf_active_rollout']['max-age'] == max_age
++    assert resp.cookies['dwf_inactive_rollout']['max-age'] == ''
++    assert resp.cookies['dwf_active_no_rollout']['max-age'] == max_age
++    assert resp.cookies['dwf_inactive_no_rollout']['max-age'] == max_age
++
++
+ def test_testing_cookies():
+     get.waffles = {}
+     get.waffle_tests = {'foo': True, 'bar': False}
+diff --git a/waffle/tests/test_waffle.py b/waffle/tests/test_waffle.py
+index d361c48..e27da0e 100644
+--- a/waffle/tests/test_waffle.py
++++ b/waffle/tests/test_waffle.py
+@@ -804,6 +804,71 @@ class FunctionTests(TestCase):
+         assert 'dwf_myflag' not in response.cookies
+         self.assertEqual(b'off', response.content)
+ 
++    @mock.patch.object(random, 'uniform')
++    def test_rollout_active_cookie_max_age(self, uniform):
++        """Rollout=True, active=True → persistent cookie with MAX_AGE."""
++        from waffle.utils import get_setting
++        max_age = str(get_setting('MAX_AGE'))
++        uniform.return_value = '10'
++        waffle.get_waffle_flag_model().objects.create(
++            name='myflag', percent='50.0', rollout=True)
++        request = get()
++        response = process_request(request, views.flag_in_view)
++        assert 'dwf_myflag' in response.cookies
++        self.assertEqual('True', response.cookies['dwf_myflag'].value)
++        self.assertEqual(max_age, response.cookies['dwf_myflag']['max-age'])
++
++    @mock.patch.object(random, 'uniform')
++    def test_rollout_inactive_cookie_max_age(self, uniform):
++        """Rollout=True, active=False → session cookie (no max-age)."""
++        uniform.return_value = '70'
++        waffle.get_waffle_flag_model().objects.create(
++            name='myflag', percent='50.0', rollout=True)
++        request = get()
++        response = process_request(request, views.flag_in_view)
++        assert 'dwf_myflag' in response.cookies
++        self.assertEqual('False', response.cookies['dwf_myflag'].value)
++        self.assertEqual('', response.cookies['dwf_myflag']['max-age'])
++
++    @mock.patch.object(random, 'uniform')
++    def test_no_rollout_active_cookie_max_age(self, uniform):
++        """Rollout=False, active=True → persistent cookie with MAX_AGE."""
++        from waffle.utils import get_setting
++        max_age = str(get_setting('MAX_AGE'))
++        uniform.return_value = '10'
++        waffle.get_waffle_flag_model().objects.create(
++            name='myflag', percent='50.0', rollout=False)
++        request = get()
++        response = process_request(request, views.flag_in_view)
++        assert 'dwf_myflag' in response.cookies
++        self.assertEqual('True', response.cookies['dwf_myflag'].value)
++        self.assertEqual(max_age, response.cookies['dwf_myflag']['max-age'])
++
++    @mock.patch.object(random, 'uniform')
++    def test_no_rollout_inactive_cookie_max_age(self, uniform):
++        """Rollout=False, active=False → persistent cookie with MAX_AGE."""
++        from waffle.utils import get_setting
++        max_age = str(get_setting('MAX_AGE'))
++        uniform.return_value = '70'
++        waffle.get_waffle_flag_model().objects.create(
++            name='myflag', percent='50.0', rollout=False)
++        request = get()
++        response = process_request(request, views.flag_in_view)
++        assert 'dwf_myflag' in response.cookies
++        self.assertEqual('False', response.cookies['dwf_myflag'].value)
++        self.assertEqual(max_age, response.cookies['dwf_myflag']['max-age'])
++
++    @mock.patch.object(random, 'uniform')
++    def test_is_active_for_percent_returns_false_on_miss(self, uniform):
++        """_is_active_for_percent should return False (not None) when roll fails."""
++        uniform.return_value = '70'
++        flag = waffle.get_waffle_flag_model().objects.create(
++            name='myflag', percent='50.0', rollout=True)
++        request = get()
++        result = flag._is_active_for_percent(request, read_only=False)
++        self.assertFalse(result)
++        self.assertIsNotNone(result)
++
+ 
+ class WaffleFlagEveryoneSettingTests(TestCase):
+     databases = DATABASES

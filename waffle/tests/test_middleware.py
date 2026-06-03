@@ -2,6 +2,7 @@ from django.http import HttpResponse
 from django.test import RequestFactory
 
 from waffle.middleware import WaffleMiddleware
+from waffle.utils import get_setting
 
 
 get = RequestFactory().get('/foo')
@@ -36,6 +37,24 @@ def test_rollout_cookies():
             assert bool(resp.cookies[cookie]['max-age']) == get.waffles[k][0]
         else:
             assert resp.cookies[cookie]['max-age']
+
+
+def test_rollout_cookie_max_age_combinations():
+    max_age = str(get_setting('MAX_AGE'))
+    req = RequestFactory().get('/foo')
+    req.waffles = {
+        'active_rollout': [True, True],
+        'inactive_rollout': [False, True],
+        'active_no_rollout': [True, False],
+        'inactive_no_rollout': [False, False],
+    }
+    resp = HttpResponse()
+    resp = WaffleMiddleware().process_response(req, resp)
+
+    assert resp.cookies['dwf_active_rollout']['max-age'] == max_age
+    assert resp.cookies['dwf_inactive_rollout']['max-age'] == ''
+    assert resp.cookies['dwf_active_no_rollout']['max-age'] == max_age
+    assert resp.cookies['dwf_inactive_no_rollout']['max-age'] == max_age
 
 
 def test_testing_cookies():
