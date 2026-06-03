@@ -1,0 +1,230 @@
+diff --git a/waffle/models.py b/waffle/models.py
+index 6aa0d34..eb3ee72 100644
+--- a/waffle/models.py
++++ b/waffle/models.py
+@@ -46,23 +46,34 @@ class BaseModel(models.Model):
+         return keyfmt(get_setting(cls.SINGLE_CACHE_KEY), name)
+ 
+     @classmethod
+-    def get(cls: type[_BaseModelType], name: str) -> _BaseModelType:
++    def _cached_or_fallback(cls, cache_key, fallback, empty_value=None):
+         cache = get_cache()
+-        cache_key = cls._cache_key(name)
+         cached = cache.get(cache_key)
+         if cached == CACHE_EMPTY:
+-            return cls(name=name)
++            return empty_value
+         if cached:
+             return cached
+ 
+-        try:
+-            obj = cls.get_from_db(name)
+-        except cls.DoesNotExist:
++        result = fallback()
++        if result is None or (isinstance(result, (list, set, tuple)) and not result):
+             cache.add(cache_key, CACHE_EMPTY)
+-            return cls(name=name)
++            return empty_value
+ 
+-        cache.add(cache_key, obj)
+-        return obj
++        cache.add(cache_key, result)
++        return result
++
++    @classmethod
++    def get(cls: type[_BaseModelType], name: str) -> _BaseModelType:
++        cache_key = cls._cache_key(name)
++        
++        def fallback():
++            try:
++                return cls.get_from_db(name)
++            except cls.DoesNotExist:
++                return None
++        
++        result = cls._cached_or_fallback(cache_key, fallback)
++        return result if result is not None else cls(name=name)
+ 
+     @classmethod
+     def get_from_db(cls: type[_BaseModelType], name: str) -> _BaseModelType:
+@@ -73,21 +84,12 @@ class BaseModel(models.Model):
+ 
+     @classmethod
+     def get_all(cls: type[_BaseModelType]) -> list[_BaseModelType]:
+-        cache = get_cache()
+         cache_key = get_setting(cls.ALL_CACHE_KEY)
+-        cached = cache.get(cache_key)
+-        if cached == CACHE_EMPTY:
+-            return []
+-        if cached:
+-            return cached
+-
+-        objs = cls.get_all_from_db()
+-        if not objs:
+-            cache.add(cache_key, CACHE_EMPTY)
+-            return []
+-
+-        cache.add(cache_key, objs)
+-        return objs
++        
++        def fallback():
++            return cls.get_all_from_db()
++        
++        return cls._cached_or_fallback(cache_key, fallback, empty_value=[])
+ 
+     @classmethod
+     def get_all_from_db(cls: type[_BaseModelType]) -> list[_BaseModelType]:
+@@ -366,38 +368,20 @@ class AbstractUserFlag(AbstractBaseFlag):
+         return flush_keys
+ 
+     def _get_user_ids(self) -> set[Any]:
+-        cache = get_cache()
+         cache_key = keyfmt(get_setting('FLAG_USERS_CACHE_KEY'), self.name)
+-        cached = cache.get(cache_key)
+-        if cached == CACHE_EMPTY:
+-            return set()
+-        if cached:
+-            return cached
+-
+-        user_ids = set(self.users.all().values_list('pk', flat=True))
+-        if not user_ids:
+-            cache.add(cache_key, CACHE_EMPTY)
+-            return set()
+-
+-        cache.add(cache_key, user_ids)
+-        return user_ids
++        
++        def fallback():
++            return set(self.users.all().values_list('pk', flat=True))
++        
++        return self._cached_or_fallback(cache_key, fallback, empty_value=set())
+ 
+     def _get_group_ids(self) -> set[Any]:
+-        cache = get_cache()
+         cache_key = keyfmt(get_setting('FLAG_GROUPS_CACHE_KEY'), self.name)
+-        cached = cache.get(cache_key)
+-        if cached == CACHE_EMPTY:
+-            return set()
+-        if cached:
+-            return cached
+-
+-        group_ids = set(self.groups.all().values_list('pk', flat=True))
+-        if not group_ids:
+-            cache.add(cache_key, CACHE_EMPTY)
+-            return set()
+-
+-        cache.add(cache_key, group_ids)
+-        return group_ids
++        
++        def fallback():
++            return set(self.groups.all().values_list('pk', flat=True))
++        
++        return self._cached_or_fallback(cache_key, fallback, empty_value=set())
+ 
+     def is_active_for_user(self, user: AbstractBaseUser) -> bool | None:
+         is_active = super().is_active_for_user(user)
+diff --git a/waffle/tests/test_models.py b/waffle/tests/test_models.py
+index fbe72c1..90e5bf7 100644
+--- a/waffle/tests/test_models.py
++++ b/waffle/tests/test_models.py
+@@ -5,6 +5,7 @@ from waffle import (
+     get_waffle_sample_model,
+     get_waffle_switch_model,
+ )
++from waffle.utils import get_cache
+ from django.contrib.auth.models import User
+ 
+ 
+@@ -36,3 +37,93 @@ class ModelsTests(TestCase):
+         flag = get_waffle_flag_model().objects.create(name='test-flag')
+         flag.everyone = True
+         self.assertEqual(flag.is_active_for_user(User()), True)
++
++
++class CacheTests(TestCase):
++    def setUp(self):
++        self.cache = get_cache()
++        self.Flag = get_waffle_flag_model()
++        self.Switch = get_waffle_switch_model()
++        self.Sample = get_waffle_sample_model()
++
++    def tearDown(self):
++        self.cache.clear()
++
++    def test_get_missing_flag(self):
++        flag = self.Flag.get('non-existent-flag')
++        self.assertIsNotNone(flag)
++        self.assertEqual(flag.name, 'non-existent-flag')
++        self.assertIsNone(flag.pk)
++
++        cache_key = self.Flag._cache_key('non-existent-flag')
++        self.assertEqual(self.cache.get(cache_key), '-')
++
++    def test_get_existing_flag_from_db(self):
++        flag = self.Flag.objects.create(name='existing-flag')
++        
++        result = self.Flag.get('existing-flag')
++        self.assertEqual(result.pk, flag.pk)
++        self.assertEqual(result.name, 'existing-flag')
++        
++        cache_key = self.Flag._cache_key('existing-flag')
++        self.assertIsNotNone(self.cache.get(cache_key))
++
++    def test_get_cached_flag(self):
++        flag = self.Flag.objects.create(name='cached-flag')
++        cache_key = self.Flag._cache_key('cached-flag')
++        self.cache.set(cache_key, flag)
++        
++        result = self.Flag.get('cached-flag')
++        self.assertEqual(result.pk, flag.pk)
++
++    def test_get_all_empty_flags(self):
++        flags = self.Flag.get_all()
++        self.assertEqual(flags, [])
++        
++        cache_key = self.Flag.ALL_CACHE_KEY
++        from waffle.utils import get_setting
++        self.assertEqual(self.cache.get(get_setting(cache_key)), '-')
++
++    def test_get_all_flags_from_db(self):
++        flag1 = self.Flag.objects.create(name='flag1')
++        flag2 = self.Flag.objects.create(name='flag2')
++        
++        flags = self.Flag.get_all()
++        self.assertEqual(len(flags), 2)
++        self.assertEqual({f.name for f in flags}, {'flag1', 'flag2'})
++
++    def test_get_all_cached_flags(self):
++        flag1 = self.Flag.objects.create(name='cached-flag1')
++        flag2 = self.Flag.objects.create(name='cached-flag2')
++        cache_key = self.Flag.ALL_CACHE_KEY
++        from waffle.utils import get_setting
++        self.cache.set(get_setting(cache_key), [flag1, flag2])
++        
++        flags = self.Flag.get_all()
++        self.assertEqual(len(flags), 2)
++
++    def test_switch_cache(self):
++        switch = self.Switch.objects.create(name='test-switch', active=True)
++        
++        result = self.Switch.get('test-switch')
++        self.assertEqual(result.pk, switch.pk)
++        self.assertTrue(result.active)
++
++    def test_sample_cache(self):
++        sample = self.Sample.objects.create(name='test-sample', percent=50)
++        
++        result = self.Sample.get('test-sample')
++        self.assertEqual(result.pk, sample.pk)
++        self.assertEqual(result.percent, 50)
++
++    def test_flag_user_ids_empty(self):
++        flag = self.Flag.objects.create(name='user-flag')
++        
++        user_ids = flag._get_user_ids()
++        self.assertEqual(user_ids, set())
++
++    def test_flag_group_ids_empty(self):
++        flag = self.Flag.objects.create(name='group-flag')
++        
++        group_ids = flag._get_group_ids()
++        self.assertEqual(group_ids, set())

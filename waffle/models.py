@@ -46,23 +46,34 @@ class BaseModel(models.Model):
         return keyfmt(get_setting(cls.SINGLE_CACHE_KEY), name)
 
     @classmethod
-    def get(cls: type[_BaseModelType], name: str) -> _BaseModelType:
+    def _cached_or_fallback(cls, cache_key, fallback, empty_value=None):
         cache = get_cache()
-        cache_key = cls._cache_key(name)
         cached = cache.get(cache_key)
         if cached == CACHE_EMPTY:
-            return cls(name=name)
+            return empty_value
         if cached:
             return cached
 
-        try:
-            obj = cls.get_from_db(name)
-        except cls.DoesNotExist:
+        result = fallback()
+        if result is None or (isinstance(result, (list, set, tuple)) and not result):
             cache.add(cache_key, CACHE_EMPTY)
-            return cls(name=name)
+            return empty_value
 
-        cache.add(cache_key, obj)
-        return obj
+        cache.add(cache_key, result)
+        return result
+
+    @classmethod
+    def get(cls: type[_BaseModelType], name: str) -> _BaseModelType:
+        cache_key = cls._cache_key(name)
+        
+        def fallback():
+            try:
+                return cls.get_from_db(name)
+            except cls.DoesNotExist:
+                return None
+        
+        result = cls._cached_or_fallback(cache_key, fallback)
+        return result if result is not None else cls(name=name)
 
     @classmethod
     def get_from_db(cls: type[_BaseModelType], name: str) -> _BaseModelType:
@@ -73,21 +84,12 @@ class BaseModel(models.Model):
 
     @classmethod
     def get_all(cls: type[_BaseModelType]) -> list[_BaseModelType]:
-        cache = get_cache()
         cache_key = get_setting(cls.ALL_CACHE_KEY)
-        cached = cache.get(cache_key)
-        if cached == CACHE_EMPTY:
-            return []
-        if cached:
-            return cached
-
-        objs = cls.get_all_from_db()
-        if not objs:
-            cache.add(cache_key, CACHE_EMPTY)
-            return []
-
-        cache.add(cache_key, objs)
-        return objs
+        
+        def fallback():
+            return cls.get_all_from_db()
+        
+        return cls._cached_or_fallback(cache_key, fallback, empty_value=[])
 
     @classmethod
     def get_all_from_db(cls: type[_BaseModelType]) -> list[_BaseModelType]:
@@ -366,38 +368,20 @@ class AbstractUserFlag(AbstractBaseFlag):
         return flush_keys
 
     def _get_user_ids(self) -> set[Any]:
-        cache = get_cache()
         cache_key = keyfmt(get_setting('FLAG_USERS_CACHE_KEY'), self.name)
-        cached = cache.get(cache_key)
-        if cached == CACHE_EMPTY:
-            return set()
-        if cached:
-            return cached
-
-        user_ids = set(self.users.all().values_list('pk', flat=True))
-        if not user_ids:
-            cache.add(cache_key, CACHE_EMPTY)
-            return set()
-
-        cache.add(cache_key, user_ids)
-        return user_ids
+        
+        def fallback():
+            return set(self.users.all().values_list('pk', flat=True))
+        
+        return self._cached_or_fallback(cache_key, fallback, empty_value=set())
 
     def _get_group_ids(self) -> set[Any]:
-        cache = get_cache()
         cache_key = keyfmt(get_setting('FLAG_GROUPS_CACHE_KEY'), self.name)
-        cached = cache.get(cache_key)
-        if cached == CACHE_EMPTY:
-            return set()
-        if cached:
-            return cached
-
-        group_ids = set(self.groups.all().values_list('pk', flat=True))
-        if not group_ids:
-            cache.add(cache_key, CACHE_EMPTY)
-            return set()
-
-        cache.add(cache_key, group_ids)
-        return group_ids
+        
+        def fallback():
+            return set(self.groups.all().values_list('pk', flat=True))
+        
+        return self._cached_or_fallback(cache_key, fallback, empty_value=set())
 
     def is_active_for_user(self, user: AbstractBaseUser) -> bool | None:
         is_active = super().is_active_for_user(user)
