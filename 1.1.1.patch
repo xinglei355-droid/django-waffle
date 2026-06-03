@@ -1,0 +1,284 @@
+diff --git a/simple_test.py b/simple_test.py
+new file mode 100644
+index 0000000..0b21afd
+--- /dev/null
++++ b/simple_test.py
+@@ -0,0 +1,51 @@
++#!/usr/bin/env python
++import os
++import django
++from django.conf import settings
++from django.http import HttpResponse, HttpRequest
++from waffle.middleware import WaffleMiddleware
++import waffle.defaults
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    ROOT_URLCONF='',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    WAFFLE_COOKIE=waffle.defaults.COOKIE,
++    WAFFLE_MAX_AGE=waffle.defaults.MAX_AGE,
++    WAFFLE_SECURE=waffle.defaults.SECURE,
++)
++
++django.setup()
++
++print("Testing current WaffleMiddleware behavior...")
++print(f"MAX_AGE is: {settings.WAFFLE_MAX_AGE}")
++print("=" * 80)
++
++# Test all four combinations
++test_cases = [
++    ('case1', True, True),    # active=True, rollout=True
++    ('case2', False, True),   # active=False, rollout=True
++    ('case3', True, False),   # active=True, rollout=False
++    ('case4', False, False),  # active=False, rollout=False
++]
++
++request = HttpRequest()
++request.waffles = {name: (active, rollout) for name, active, rollout in test_cases}
++response = HttpResponse()
++response = WaffleMiddleware().process_response(request, response)
++
++for name, active, rollout in test_cases:
++    cookie_name = f'dwf_{name}'
++    cookie = response.cookies[cookie_name]
++    
++    max_age_set = bool(cookie.get('max-age'))
++    print(f"{name}: active={active}, rollout={rollout}")
++    print(f"  cookie.value: {cookie.value}")
++    print(f"  has max-age: {max_age_set}")
++    if 'max-age' in cookie:
++        print(f"  max-age value: {cookie['max-age']}")
++    print()
+diff --git a/test_behavior.py b/test_behavior.py
+new file mode 100644
+index 0000000..010fd1a
+--- /dev/null
++++ b/test_behavior.py
+@@ -0,0 +1,32 @@
++#!/usr/bin/env python
++from django.http import HttpResponse, HttpRequest
++from waffle.middleware import WaffleMiddleware
++
++# Create a mock request
++request = HttpRequest()
++request.waffles = {
++    'case1': [True, True],   # active=True, rollout=True
++    'case2': [False, True],  # active=False, rollout=True
++    'case3': [True, False],  # active=True, rollout=False
++    'case4': [False, False], # active=False, rollout=False
++}
++
++# Create a response
++response = HttpResponse()
++
++# Process with middleware
++response = WaffleMiddleware().process_response(request, response)
++
++# Print results
++print("Testing cookie max_age behavior for all four combinations:")
++print("="*70)
++
++for name in ['case1', 'case2', 'case3', 'case4']:
++    cookie_name = f'dwf_{name}'
++    cookie = response.cookies[cookie_name]
++    active, rollout = request.waffles[name]
++    max_age = cookie.get('max-age', 'Not set')
++    print(f"{name}: active={active}, rollout={rollout}")
++    print(f"  Cookie value: {cookie.value}")
++    print(f"  max-age: {max_age}")
++    print()
+diff --git a/verify_fix.py b/verify_fix.py
+new file mode 100644
+index 0000000..f0e06db
+--- /dev/null
++++ b/verify_fix.py
+@@ -0,0 +1,85 @@
++#!/usr/bin/env python
++"""Verify that our fixes work correctly."""
++
++import sys
++import os
++
++# Add the parent directory to the Python path
++sys.path.insert(0, os.path.abspath('/app/django-waffle'))
++
++from unittest.mock import Mock, MagicMock
++from django.http import HttpResponse, HttpRequest
++from django.conf import settings
++
++# Configure minimal Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        WAFFLE_COOKIE='dwf_%s',
++        WAFFLE_MAX_AGE=2592000,
++        WAFFLE_SECURE=True,
++    )
++
++from waffle.middleware import WaffleMiddleware
++from waffle.models import set_flag
++
++print("Testing our fixes...")
++print("="*80)
++
++print("\n1. Testing WaffleMiddleware with session_only values:")
++
++# Test all four combinations
++test_cases = [
++    ("active=True, session_only=True", True, True, None),
++    ("active=False, session_only=True", False, True, None),
++    ("active=True, session_only=False", True, False, 2592000),
++    ("active=False, session_only=False", False, False, 2592000),
++]
++
++all_passed = True
++
++for desc, active, session_only, expected_max_age in test_cases:
++    request = HttpRequest()
++    request.waffles = {'test': (active, session_only)}
++    response = HttpResponse()
++    
++    response = WaffleMiddleware().process_response(request, response)
++    
++    cookie = response.cookies['dwf_test']
++    actual_max_age = cookie.get('max-age')
++    
++    if actual_max_age == '':
++        actual_max_age = None
++    elif actual_max_age is not None:
++        actual_max_age = int(actual_max_age)
++    
++    passed = (cookie.value == str(active)) and (actual_max_age == expected_max_age)
++    
++    print(f"\n{desc}:")
++    print(f"  Cookie value: {cookie.value} (expected: {str(active)})")
++    print(f"  max-age: {actual_max_age} (expected: {expected_max_age})")
++    print(f"  {'✓ PASSED' if passed else '✗ FAILED'}")
++    
++    if not passed:
++        all_passed = False
++
++print("\n" + "="*80)
++
++print("\n2. Testing set_flag function:")
++request2 = HttpRequest()
++set_flag(request2, 'test_flag', True, False)
++print(f"set_flag('test_flag', True, False): {request2.waffles['test_flag']}")
++assert request2.waffles['test_flag'] == [True, False]
++
++set_flag(request2, 'test_flag2', False, True)
++print(f"set_flag('test_flag2', False, True): {request2.waffles['test_flag2']}")
++assert request2.waffles['test_flag2'] == [False, True]
++print("✓ set_flag tests passed")
++
++print("\n" + "="*80)
++
++if all_passed:
++    print("\n🎉 All tests passed! Our fixes are correct.")
++else:
++    print("\n⚠️ Some tests failed.")
++    sys.exit(1)
+diff --git a/waffle/middleware.py b/waffle/middleware.py
+index ec31b1a..bb45a9c 100644
+--- a/waffle/middleware.py
++++ b/waffle/middleware.py
+@@ -13,9 +13,9 @@ class WaffleMiddleware(MiddlewareMixin):
+         if hasattr(request, 'waffles'):
+             for k in request.waffles:
+                 name = smart_str(get_setting('COOKIE') % k)
+-                active, rollout = request.waffles[k]
+-                if rollout and not active:
+-                    # "Inactive" is a session cookie during rollout mode.
++                active, session_only = request.waffles[k]
++                if session_only:
++                    # Session cookie (expires when browser closes)
+                     age = None
+                 else:
+                     age = max_age
+diff --git a/waffle/models.py b/waffle/models.py
+index 6aa0d34..d79ce7e 100644
+--- a/waffle/models.py
++++ b/waffle/models.py
+@@ -270,12 +270,13 @@ class AbstractBaseFlag(BaseModel):
+             if cookie in request.COOKIES:
+                 flag_active = request.COOKIES[cookie] == 'True'
+                 if not read_only:
+-                    set_flag(request, self.name, flag_active, self.rollout)
++                    session_only = self.rollout and not flag_active
++                    set_flag(request, self.name, flag_active, session_only)
+                 return flag_active
+ 
+             if not read_only:
+                 if Decimal(str(random.uniform(0, 100))) <= self.percent:
+-                    set_flag(request, self.name, True, self.rollout)
++                    set_flag(request, self.name, True, False)
+                     return True
+                 set_flag(request, self.name, False, self.rollout)
+ 
+diff --git a/waffle/tests/test_middleware.py b/waffle/tests/test_middleware.py
+index 11af7c9..561d944 100644
+--- a/waffle/tests/test_middleware.py
++++ b/waffle/tests/test_middleware.py
+@@ -2,6 +2,7 @@ from django.http import HttpResponse
+ from django.test import RequestFactory
+ 
+ from waffle.middleware import WaffleMiddleware
++from waffle.defaults import MAX_AGE
+ 
+ 
+ get = RequestFactory().get('/foo')
+@@ -21,8 +22,38 @@ def test_set_cookies():
+     assert 'False' == resp.cookies['dwf_bar'].value
+ 
+ 
++def test_rollout_cookies_all_combinations():
++    # Test all four combinations:
++    # (active=True, session_only=True): max-age should be None (session cookie)
++    # (active=False, session_only=True): max-age should be None
++    # (active=True, session_only=False): max-age should be MAX_AGE
++    # (active=False, session_only=False): max-age should be MAX_AGE
++    get.waffles = {
++        'active_true_session_true': [True, True],
++        'active_false_session_true': [False, True],
++        'active_true_session_false': [True, False],
++        'active_false_session_false': [False, False],
++    }
++    resp = HttpResponse()
++    resp = WaffleMiddleware().process_response(get, resp)
++    
++    for k in get.waffles:
++        cookie = f'dwf_{k}'
++        active, session_only = get.waffles[k]
++        assert cookie in resp.cookies
++        assert str(active) == resp.cookies[cookie].value
++        
++        if session_only:
++            # Session cookie: max-age should not be set or should be empty
++            assert 'max-age' not in resp.cookies[cookie] or not resp.cookies[cookie]['max-age']
++        else:
++            # Persistent cookie: max-age should be set
++            assert resp.cookies[cookie]['max-age']
++            assert int(resp.cookies[cookie]['max-age']) == MAX_AGE
++
++
+ def test_rollout_cookies():
+-    get.waffles = {'foo': [True, True],
++    get.waffles = {'foo': [True, False],
+                    'bar': [False, True],
+                    'baz': [True, False],
+                    'qux': [False, False]}
+@@ -33,7 +64,7 @@ def test_rollout_cookies():
+         assert cookie in resp.cookies
+         assert str(get.waffles[k][0]) == resp.cookies[cookie].value
+         if get.waffles[k][1]:
+-            assert bool(resp.cookies[cookie]['max-age']) == get.waffles[k][0]
++            assert 'max-age' not in resp.cookies[cookie] or not bool(resp.cookies[cookie]['max-age'])
+         else:
+             assert resp.cookies[cookie]['max-age']
+ 
